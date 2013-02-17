@@ -3,6 +3,7 @@
 """Pattern base module"""
 
 import re
+import os
 
 from morph.errors import (
     PatternModeError,
@@ -52,14 +53,19 @@ class LiteralPattern(Pattern):
                self.mode == other.mode
 
     def apply_to_string(self, original, new, position):
+        dirname, basename = os.path.split(new)
+
         if self.mode == MODE_APPEND:
-            return new + self.literal
+            name = basename + self.literal
         elif self.mode == MODE_INSERT:
-            return new[:self.position] + self.literal + new[self.position:]
+            name = basename[:self.position] + \
+                   self.literal + basename[self.position:]
         elif self.mode == MODE_REPLACE:
-            return self.literal
+            name = self.literal
         else:
             raise PatternModeError(self.mode)
+
+        return os.path.join(dirname, name)
 
     def reset(self):
         pass
@@ -92,18 +98,22 @@ class NumericCounterPattern(Pattern):
                self.mode == other.mode
 
     def apply_to_string(self, original, new, position):
+        dirname, basename = os.path.split(new)
         self.counter += 1
 
+        counterstr = ('%%0%dd' % self.padding) % (self.counter - 1) 
+
         if self.mode == MODE_APPEND:
-            return new + ('%%0%dd' % self.padding) % (self.counter - 1)
+            name = basename + counterstr
         elif self.mode == MODE_INSERT:
-            return new[:self.position] + \
-                   ('%%0%dd' % self.padding) % (self.counter - 1) + \
-                   new[self.position:]
+            name = basename[:self.position] + \
+                   counterstr + basename[self.position:]
         elif self.mode == MODE_REPLACE:
-            return ('%%0%dd' % self.padding) % (self.counter - 1)
+            name = counterstr
         else:
             raise PatternModeError(self.mode)
+
+        return os.path.join(dirname, name)
 
     def reset(self):
         self.counter = self.start

@@ -1,0 +1,406 @@
+#!/usr/bin/python2
+
+import sys, os, copy, subprocess
+import cmdln
+from cmdln import Cmdln
+
+from morph import (
+    pattern,
+    patternchain,
+)
+from morph.pattern import generatePattern
+from morph.patternchain import (
+    generateFullReplaceChain,
+    FilePatternChain
+)
+
+
+class MorphCmdln(Cmdln):
+    name = 'Morph'
+
+    def __init__(self, filenames=[]):
+        Cmdln.__init__(self)
+        self.original = filenames
+        self.applied = []
+        self.chains = []
+        self.patterns = []
+
+    def gen_file_list(self):
+        file_list = self.original
+        for chain in self.applied:
+            file_list = chain.apply_to_strings(file_list)
+            chain.reset()
+
+        return file_list
+
+    def gen_file_map(self):
+        file_list = self.original
+        file_map = zip(file_list, file_list)
+        for chain in self.applied:
+            file_list = chain.apply_to_strings(file_list)
+            orig = [pair[0] for pair in file_map]
+            if isinstance(chain, FilePatternChain):
+                old_file_list = [pair[0] for pair in chain.map_to_strings(orig) if pair[1] is not None]
+                file_map = zip(old_file_list, file_list)
+            else:
+                file_map = zip(orig, file_list)
+            chain.reset()
+        return file_map
+
+
+    def chain_used(self, testchain):
+        for chain in self.applied:
+            if chain == testchain:
+                return True
+        return False
+
+    @cmdln.alias('file', 'status')
+    @cmdln.option('-m', '--move-to', metavar='INDEX',
+                  help='Move file to position DEST')
+    @cmdln.option('-d', '--delete', metavar='DEST',
+                  help='Delete file at position INDEX')
+    # TODO: Allow adding new files
+    def do_files(self, subcmd, opts, *args):
+        """NAME
+        ${cmd_name}: List and manage file list
+
+SYNOPSIS
+        files
+        file -m DEST INDEX
+        file -d INDEX
+
+DESCRIPTION
+        The file list is the current view of the candidate files for renaming.
+        In the case that some pattern chains have already been applied, this
+        list represents the file list after those pattern chains have been
+        applied in sequennce and before the next pattern chain is to be
+        applied.
+
+        The file list is a list of filenames indexed starting from 0. The
+        filenames may not correspond to existing files on disk.
+
+${cmd_option_list}
+        """
+
+        file_list = self.gen_file_list()
+
+        if len(self.applied) and isinstance(self.applied[-1], FilePatternChain):
+            chain = self.applied.pop()
+        else:
+            chain = FilePatternChain()
+
+        if opts.delete:
+            index = int(opts.delete)
+            try:
+                delete = yesno('Delete %s?' % file_list[index], False)
+                if delete:
+                    chain.delete_file(index)
+                else:
+                    if len(chain) > 0:
+                        self.applied.append(chain)
+                    return
+            except IndexError:
+                print 'No file at position %d' % index
+        elif opts.move_to:
+            original = int(args[0])
+            new = int(opts.move_to)
+            try:
+                move = yesno('Move %s from position %d to %d?' % (file_list[original], original, new))
+                if move:
+                    chain.move_file(original, new)
+                else:
+                    if len(chain) > 0:
+                        self.applied.append(chain)
+                    return
+            except IndexError:
+                print 'Invalid indices %d, %d' % (original, new)
+
+        if len(chain) > 0:
+            self.applied.append(chain)
+
+        # Fall through: List files
+        for num, filename in enumerate(self.gen_file_list()):
+            print "%d: %s" % (num, filename)
+
+    @cmdln.alias('patterns', 'pat', 'pats')
+    def do_pattern(self, subcmd, opts, *args):
+        """${cmd_name}: Pattern subcommand
+
+        Default operation lists known patterns
+
+        Usage: mode:MODE type:TYPE [key:value ...]
+
+        ${cmd_option_list}
+        """
+
+        if len(args) > 0:
+            patdict = {}
+
+            for arg in args:
+                key, value = arg.split(':')
+
+                if key == 'type':
+                    value = pattern.patternmap.get(value, None)
+                elif key == 'mode':
+                    value = value if value in  pattern.MODES else None
+
+                if value is None or value is '':
+                    continue
+
+                patdict[key] = value
+
+            if not 'mode' in patdict or not 'type' in patdict:
+                print 'Required fields are "mode" and "type"'
+                print 'Valid modes: %s' % ', '.join(pattern.MODES)
+                print 'Valid types: %s' % ', '.join(pattern.patternmap.keys())
+            else:
+                patobject = patdict.pop('type')
+                try:
+                    pat = patobject(**patdict)
+                    self.patterns.append(pat)
+                except Exception as e:
+                    print '%s: %s' % (patobject.__name__, e)
+
+        for num, pat in enumerate(self.patterns):
+            print 'Pattern %d:\t%s' % (num, pat)
+
+
+    @cmdln.alias('chains')
+    @cmdln.option('-n', '--new', metavar='TYPE',
+                  help='Make a new chain of TYPE with PAT [PATS...]')
+    @cmdln.option('-e', '--edit', metavar='NUM',
+                  help='Edit an existing chain NUM')
+    @cmdln.option('-r', '--replace-with', metavar='PATTERN',
+                  help='Replace chain pattern with PATTERN')
+    @cmdln.option('-i', '--insert-at', metavar='POSITION',
+                  help='Insert chain pattern at POSITION')
+    @cmdln.option('-d', '--delete', metavar='NUM',
+                  help='Delete an existing chain NUM')
+
+    def do_chain(self, subcmd, opts, *args):
+        """NAME
+        ${cmd_name}: List and manage pattern chains
+
+SYNOPSIS
+        chains
+        chain -n TYPE PAT [PATS....]
+        chain -e CHAINNUM -r PATTERN POS
+        chain -e CHAINNUM -i POS PATTERN
+        chain -e CHAINNUM -d POS
+
+DESCRIPTION
+       Pattern chains are sequences of patterns that can be applied
+       to a list of files. Pattern chains have a TYPE which describes
+       the chain's general behaviour when modifying a filename.
+
+       With -n or --new, a new chain can be created. The list of PATS
+       as arguments create default patterns - ## creates an incrementing
+       number pattern padded to 2 digits and starts at 0, foo.bar creates
+       a literal pattern with the string 'foo.bar'.
+
+       With -e or --edit, patterns can be replaced, inserted, or deleted
+       in an existing chain. Existing patterns are referenced by their
+       index in the known pattern list.
+
+${cmd_option_list}
+        """
+
+        if opts.new:
+            # TODO: Allow use of existing patterns
+            if opts.new == patternchain.TYPE_REPLACE:
+                chain = generateFullReplaceChain(args)
+            else:
+                print 'Valid chain types: %s' % ', '.join(patternchain.TYPES)
+                return
+
+            if chain:
+                self.chains.append(chain)
+                for pat in chain:
+                    self.patterns.append(pat)
+            else:
+                print 'No chain created'
+                return
+        elif opts.edit:
+            chain = self.chains[int(opts.edit)]
+
+            if self.chain_used(chain):
+                edit = yesno('Chain in use. Make a copy to edit?')
+
+                if not edit:
+                    return
+                else:
+                    chain = copy.copy(chain)
+                    self.chains.append(chain)
+
+            print "edit\n%s" %  chain
+
+            if opts.replace_with:
+                replacement = self.patterns[int(opts.replace_with)]
+                chain[int(args[0])] = replacement
+            elif opts.insert_at:
+                insertion = self.patterns[int(args[0])]
+                chain.insert(int(opts.insert_at), insertion)
+
+            print "editted:\n%s" % chain
+        elif opts.delete:
+            num = int(opts.delete)
+
+            try:
+                chain = self.chains[num]
+                if self.chain_used(chain):
+                    print 'Chain in use. Cannot delete.'
+                    return
+
+                delete = yesno('Chain %d:\n%s\nDelete this chain?' %
+                               (num, chain))
+                if delete:
+                    del self.chains[num]
+                else:
+                    return
+            except IndexError:
+                print "Chain %d does not exist" % num
+
+        # Fall through: list all chains
+        for num, chain in enumerate(self.chains):
+            if self.chain_used(chain):
+                print 'Chain %d (in use):\n%s' % (num, chain)
+            else:
+                print 'Chain %d:\n%s' % (num, chain)
+
+    def do_preview(self, subcmd, opts, *args):
+        """Name
+        ${cmd_name}: Preview a morph
+
+SYNOPSIS
+        preview
+        preview CHAINNUM
+
+DESCRIPTION
+        preview the filename changes to be applied.
+
+        With no arguments, preview the final file renames given all
+        file list manipulations and pattern chains applied so far.
+
+        Given a CHAINNUM, preview the application of the CHAINNUM
+        to the current file list.
+"""
+
+        if len(args) == 0:
+            file_map = self.gen_file_map()
+            for num, pair in enumerate(file_map):
+                print '%d: %s\t=>\t%s' % (num, pair[0], pair[1])
+
+            return
+
+        num = int(args[0])
+        try:
+            chain = self.chains[num]
+
+            print 'Preview chain %d:\n%s' % (num, chain)
+            print 'Files:'
+            for num, filename in enumerate(chain.apply_to_strings(self.gen_file_list())):
+                print "%d: %s" % (num, filename)
+            chain.reset()
+        except IndexError:
+            print "Chain %d does not exist" % num
+
+    def do_apply(self, subcmd, opts, *args):
+        """NAME
+        ${cmd_name}: Apply a pattern chain
+
+SYNOSPSIS
+        apply CHAINNUM
+
+DESCRIPTION
+        Apply the given pattern chain to the current file list
+"""
+
+        num = int(args[0])
+
+        try:
+            new_chain = self.chains[num]
+
+            print 'Apply chain %d:\n%s' % (num, new_chain)
+
+            file_list = self.gen_file_list()
+            self.applied.append(new_chain)
+            new_file_list = self.gen_file_list()
+
+            if len(set(new_file_list)) < len(new_file_list):
+                print 'Duplicate filenames detected. Chain cannot be applied.'
+                self.applied.pop()
+                return
+
+            for old, new in zip(file_list, new_file_list):
+                print '%s\t=>\t%s' % (old, new)
+        except IndexError:
+            print "Chain %d does not exist" % num
+
+    def do_undo(self, subcmd, opts, *args):
+        """NAME
+        ${cmd_name}: Undo a pattern chain
+
+SYNOPSIS
+        undo
+
+DESCRIPTION
+        Undo the last applied pattern chain
+"""
+        try:
+            self.applied.pop()
+        except IndexError:
+            print "No more chains to undo!"
+
+    @cmdln.option('-i', '--interactive', metavar='TYPE',
+                  help='Prompt before each system operation')
+    @cmdln.option('-f', '--force', metavar='TYPE',
+                  help='Execute system operations')
+    # TODO: Honour these options
+    def do_commit(self, subcmd, opts, *args):
+        """NAME
+        ${cmd_name}: Commit the morph to disk
+
+SYNOPSIS
+        commit
+
+DESCRIPTION
+        Execute the renaming commands as viewed in the preview subcommand.
+
+        A backup of each file is automatically created in the 'original' dir
+        using `cp`. If the folder already exists, this command will fail.
+"""
+
+        file_map = self.gen_file_map()
+
+        try:
+            os.mkdir('original')
+            subprocess.call(['cp'] + self.original + ['original/'])
+        except OSError as e:
+            print >> sys.stderr, "Execution failed: ", e
+            return
+
+        try:
+            for pair in file_map:
+                os.rename(pair[0], pair[1])
+        except OSError as e:
+            print >> sys.stderr, "Execution failed: ", e
+            return
+
+
+def yesno(prompt, default=False):
+    choices = 'Y/n' if default else 'y/N'
+    choice = raw_input("%s (%s) " % (prompt, choices))
+    values = ('y', 'yes', '') if default else ('y', 'yes')
+    return True if choice.strip().lower() in values else False
+
+def main(filenames):
+    file_list = []
+    for filename in filenames:
+        if os.path.isfile(filename):
+            file_list.append(filename.strip())
+
+    cmdLine = MorphCmdln(filenames=file_list)
+    cmdLine.main(argv=[], loop=cmdln.LOOP_ALWAYS)
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

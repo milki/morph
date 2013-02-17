@@ -53,3 +53,48 @@ class PatternChain(list):
         for pattern in self:
             repr += "\t%s\n" % pattern
         return repr
+
+
+class FilePatternChain(PatternChain):
+
+    def insert_file(self, filename, position):
+        self.append(('insert',filename, position))
+
+    def delete_file(self, position):
+        self.append(('delete', position))
+
+    def move_file(self, original, new):
+        self.append(('move', original, new))
+
+    def apply_to_strings(self, strings):
+        nstrings = list(strings)
+        for change in self:
+            if change[0] == 'insert':
+                nstrings.insert(change[2], change[1])
+            elif change[0] == 'delete':
+                del nstrings[change[1]]
+            elif change[0] == 'move':
+                nstrings.insert(change[2], nstrings.pop(change[1]))
+        return nstrings
+
+    def map_to_strings(self, strings):
+        file_map = zip(strings, strings)
+        for change in self:
+            if change[0] == 'insert':
+                file_map.insert(change[2], (None, change[1]))
+            elif change[0] == 'delete':
+                filename =  file_map.pop(change[1])[0]
+                file_map.append((filename, None))
+            elif change[0] == 'move':
+                file_map.insert(change[2], file_map.pop(change[1]))
+
+        return file_map
+
+    def reset(self):
+        pass
+
+    def __str__(self):
+        repr = ''
+        for change in self:
+            repr += "\t%s\n" % (change,)
+        return repr

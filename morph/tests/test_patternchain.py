@@ -15,6 +15,7 @@ from morph.pattern import (
 from morph.patternchain import (
     generateFullReplaceChain,
     PatternChain,
+    FilePatternChain,
 )
 
 from morph.errors import (
@@ -34,6 +35,15 @@ class PatternChainTestCase(TestCase):
         numcountpat = NumericCounterPattern(1, 3)
 
         self.assertEqual(PatternChain([litpat, numcountpat]), chain)
+
+    def testStr(self):
+        chain = patternchain.generateFullReplaceChain([
+            'abc_',
+            '###'])
+
+        self.assertEqual("\tLiteral (replace, abc_)\n"
+                         "\tNumericCounter (append, 1, 1, 3)\n",
+                         str(chain))
 
     def testAppendApply(self):
         appendPat0 = LiteralPattern('abc')
@@ -60,3 +70,58 @@ class PatternChainTestCase(TestCase):
 
         self.assertEqual(['abc_01', 'abc_02', 'abc_03'],
                          chain.apply_to_strings(['file0', 'file1', 'file2']))
+
+
+class FilePatternChainTestCase(TestCase):
+
+    def testApply(self):
+        chain = FilePatternChain()
+
+        chain.insert_file('file5', 5)
+        chain.insert_file('file1.5', 2)
+        chain.delete_file(0)
+        chain.move_file(0, 2)
+        chain.delete_file(2)
+
+        self.assertEqual(
+                ['file1.5', 'file2', 'file3', 'file4', 'file5'],
+                chain.apply_to_strings(
+                    ['file0', 'file1', 'file2', 'file3', 'file4'])
+                )
+
+    def testMap(self):
+        chain = FilePatternChain()
+
+        chain.insert_file('file5', 5)
+        chain.insert_file('file1.5', 2)
+        chain.delete_file(0)
+        chain.move_file(0, 2)
+        chain.delete_file(2)
+
+        self.assertEqual(
+                [(None, 'file1.5'),
+                 ('file2', 'file2'),
+                 ('file3', 'file3'),
+                 ('file4', 'file4'),
+                 (None, 'file5'),
+                 ('file0', None),
+                 ('file1', None)],
+                chain.map_to_strings(
+                    ['file0', 'file1', 'file2', 'file3', 'file4'])
+                )
+
+    def testStr(self):
+        chain = FilePatternChain()
+
+        chain.insert_file('file5', 4)
+        chain.insert_file('file1.5', 2)
+        chain.delete_file(0)
+        chain.move_file(0, 2)
+        chain.delete_file(2)
+
+        self.assertEqual("\t('insert', 'file5', 4)\n"
+                         "\t('insert', 'file1.5', 2)\n"
+                         "\t('delete', 0)\n"
+                         "\t('move', 0, 2)\n"
+                         "\t('delete', 2)\n",
+                         str(chain))
